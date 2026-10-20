@@ -1,4 +1,4 @@
-import { DEFAULTS, KINDS, BallDetector, NetJudge, rgbToHsv } from './tracker.js';
+import { DEFAULTS, KINDS, BallTracker, NetJudge, rgbToHsv } from './tracker.js';
 import { DemoScene } from './demo.js';
 
 const $ = (id) => document.getElementById(id);
@@ -24,7 +24,7 @@ const octx = overlay.getContext('2d');
 const work = document.createElement('canvas');
 const wctx = work.getContext('2d', { willReadFrequently: true });
 const maskCanvas = document.createElement('canvas');
-const detector = new BallDetector();
+const tracker = new BallTracker(S);
 const judge = new NetJudge(S);
 let demo = null;
 
@@ -144,6 +144,7 @@ function setSource(kind) {
   $('start').hidden = true;
   $('startError').hidden = true;
   judge.reset();
+  tracker.reset();
   clearBuffer();
   trail.length = 0;
   document.querySelectorAll('[data-src]').forEach((b) => b.classList.toggle('on', b.dataset.src === kind));
@@ -191,29 +192,39 @@ function runLoop(g) {
 }
 
 const trail = [];
-let lastT = -1, lastDet = null;
+let lastT = -1, view = null;
 let fpsN = 0, fpsT0 = 0, fps = 0;
-const PW = 320;
+const PIXELS = 110000; // pixels checked per frame
+
+// Only the part of the frame the ball can be in is checked: across and above the net.
+// Cropping to it gives a sharper look at the ball for the same amount of work.
+function roiRect(sw, sh, R) {
+  const cx = R.cx * sw, cy = R.cy * sh, rx = R.rx * sw, ry = R.ry * sh;
+  const x0 = Math.max(0, Math.round(cx - rx * 3.2)), x1 = Math.min(sw, Math.round(cx + rx * 3.2));
+  const y1 = Math.min(sh, Math.round(cy + ry + rx * 0.6));
+  return { x: x0, y: 0, w: Math.max(1, x1 - x0), h: Math.max(1, y1) };
+}
 
 // t: the clip's own clock (ms). wall: performance.now(), used for the replay buffer.
 function process(t, wall) {
   if (replay) return;
   const sw = srcW(), sh = srcH();
   if (!sw || !sh) return;
-  if (t < lastT) judge.reset(); // clip looped
+  if (t < lastT) { judge.reset(); tracker.reset(); } // clip looped
   lastT = t;
-  const W = PW, H = Math.max(1, Math.round((PW * sh) / sw));
-  if (work.width !== W || work.height !== H) { work.width = W; work.height = H; detector.resize(W, H); }
-  wctx.drawImage(src.el, 0, 0, W, H);
-  const img = wctx.getImageData(0, 0, W, H);
   const R = rim();
-  const e = { cx: R.cx * W, cy: R.cy * H, rx: R.rx * W, ry: R.ry * H };
-  const roi = { x0: e.cx - e.rx * 3.5, x1: e.cx + e.rx * 3.5, y0: 0, y1: e.cy + e.ry + e.rx * 0.8 };
-  const pred = lastDet && t - lastDet.t < 150 && t >= lastDet.t ? { x: lastDet.x, y: lastDet.y, r: Math.max(e.rx * 0.7, 18) } : null;
-  const det = ui.mode ? null : detector.detect(img.data, S, roi, pred);
-  if (det) lastDet = { x: det.x, y: det.y, t };
+  const roi = roiRect(sw, sh, R);
+  const k = Math.min(1, Math.sqrt(PIXELS / (roi.w * roi.h)));
+  const W = Math.max(1, Math.round(roi.w * k)), H = Math.max(1, Math.round(roi.h * k));
+  if (work.width !== W || work.height !== H) { work.width = W; work.height = H; tracker.resize(W, H); judge.reset(); }
+  view = { roi, sw, sh, W, H, k };
+  wctx.drawImage(src.el, roi.x, roi.y, roi.w, roi.h, 0, 0, W, H);
+  const img = wctx.getImageData(0, 0, W, H);
+  const e = { cx: (R.cx * sw - roi.x) * k, cy: (R.cy * sh - roi.y) * k, rx: R.rx * sw * k, ry: R.ry * sh * k };
+  const det = ui.mode ? null : tracker.update(img.data, t, e);
   const events = ui.mode ? [] : judge.update(det, t, e);
-  const norm = det ? { u: det.x / W, v: det.y / H, rr: det.r / W } : null;
+  const toNorm = (x, y) => ({ u: (roi.x + x / k) / sw, v: (roi.y + y / k) / sh });
+  const norm = det ? { ...toNorm(det.x, det.y), rr: det.r / k / sw } : null;
 
   pushFrame(wall, norm);
   trail.push({ wall, norm });
@@ -227,7 +238,7 @@ function process(t, wall) {
 
   if (S.showMask) paintMask(W, H);
   drawOverlay(norm);
-  for (const ev of events) onEvent(ev, W, H, wall - (t - ev.t));
+  for (const ev of events) onEvent(ev, toNorm(ev.x, ev.y), wall - (t - ev.t));
 }
 
 /* ---------- Overlay ---------- */
@@ -253,7 +264,7 @@ function paintMask(W, H) {
   if (maskCanvas.width !== W || maskCanvas.height !== H) { maskCanvas.width = W; maskCanvas.height = H; }
   const mctx = maskCanvas.getContext('2d');
   const id = mctx.createImageData(W, H);
-  const m = detector.mask;
+  const m = tracker.mask;
   for (let i = 0; i < m.length; i++) if (m[i]) { const o = i * 4; id.data[o] = 255; id.data[o + 1] = 40; id.data[o + 2] = 200; id.data[o + 3] = 230; }
   mctx.putImageData(id, 0, 0);
 }
@@ -293,9 +304,10 @@ function drawOverlay(norm) {
   ctx.clearRect(0, 0, overlay.clientWidth, overlay.clientHeight);
   if (!src) return;
   const cr = contentRect();
-  if (S.showMask && maskCanvas.width) {
+  if (S.showMask && maskCanvas.width && view) {
+    const { roi, sw, sh } = view;
     ctx.imageSmoothingEnabled = false;
-    ctx.drawImage(maskCanvas, cr.x, cr.y, cr.w, cr.h);
+    ctx.drawImage(maskCanvas, cr.x + (roi.x / sw) * cr.w, cr.y + (roi.y / sh) * cr.h, (roi.w / sw) * cr.w, (roi.h / sh) * cr.h);
   }
   const R = rim();
   drawRim(ctx, cr, R, { editing: ui.mode === 'rim', zones: ui.mode === 'rim' });
@@ -368,9 +380,10 @@ function setMode(mode) {
   $('modeBar').hidden = !mode;
   $('modeHint').textContent = mode === 'rim'
     ? (src && src.kind === 'demo' ? 'The demo rim is already set. Tap Done.' : 'Drag the oval onto the rim. Pull the dots to fit the width and depth.')
-    : 'Tap the ball on screen to teach it the color.';
+    : 'Set the ball on the net so it is still, then tap it.';
   $('modeDone').textContent = mode === 'color' ? 'Cancel' : 'Done';
   judge.reset();
+  tracker.reset();
   if (src) drawOverlay(null);
 }
 
@@ -424,11 +437,16 @@ overlay.addEventListener('pointermove', (ev) => {
 overlay.addEventListener('pointerup', () => { drag = null; });
 overlay.addEventListener('pointercancel', () => { drag = null; });
 
+const sampler = document.createElement('canvas');
+sampler.width = sampler.height = 9;
+const sctx = sampler.getContext('2d', { willReadFrequently: true });
+
 function sampleColor(p) {
-  const W = work.width, H = work.height;
-  const x0 = Math.round(p.u * W), y0 = Math.round(p.v * H);
-  if (x0 < 0 || y0 < 0 || x0 >= W || y0 >= H) return;
-  const d = wctx.getImageData(Math.max(0, x0 - 3), Math.max(0, y0 - 3), 7, 7).data;
+  if (p.u < 0 || p.v < 0 || p.u > 1 || p.v > 1) return;
+  const sw = srcW(), sh = srcH();
+  const size = Math.max(9, sw * 0.022); // a small patch, about the size of a ball on screen
+  sctx.drawImage(src.el, p.u * sw - size / 2, p.v * sh - size / 2, size, size, 0, 0, 9, 9);
+  const d = sctx.getImageData(0, 0, 9, 9).data;
   let sx = 0, sy = 0, ss = 0, sv = 0, n = 0;
   for (let i = 0; i < d.length; i += 4) {
     const c = rgbToHsv(d[i], d[i + 1], d[i + 2]);
@@ -449,10 +467,10 @@ function sampleColor(p) {
 
 let bannerEntry = null;
 
-function onEvent(ev, W, H, bufT) {
+function onEvent(ev, pos, bufT) {
   const K = KINDS[ev.kind];
   const color = K.fault ? '#ff5a4f' : '#3ed08a';
-  flashes.push({ u: ev.x / W, v: ev.y / H, color, label: K.short, t0: performance.now() });
+  flashes.push({ u: pos.u, v: pos.v, color, label: K.short, t0: performance.now() });
   if (!K.fault) {
     if (S.showLegal) showChip(K.label);
     return;
@@ -573,6 +591,7 @@ function closeReplay() {
   replay = null;
   $('sheet-replay').hidden = true;
   judge.reset();
+  tracker.reset();
   trail.length = 0;
   if (src && src.kind === 'file') video.play().catch(() => {});
 }

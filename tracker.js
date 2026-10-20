@@ -1,6 +1,6 @@
 // Ball detection and net-contact judging. No DOM here, so it runs the same on camera, clip or demo frames.
 //
-// Coordinates are pixels in the small processing frame (320 px wide). The rim is an ellipse
+// Coordinates are pixels in the small processing frame (the area around the net). The rim is an ellipse
 // {cx, cy, rx, ry}. A contact is judged by where the bottom of the ball is relative to that
 // ellipse: d = 0 at the center of the net, d = 1 on the rim.
 
@@ -15,8 +15,11 @@ export const DEFAULTS = {
   rollMs: 350,    // ball sitting on the net this long without bouncing = roll-up
   doubleMs: 700,  // two net contacts this close together, with no trip away from the net = double bounce
   vThr: 0.7,      // vertical speed (in rim-widths per second) that counts as moving up or down
-  minPix: 6,
-  maxPix: 3000,
+  minPix: 4,
+  maxPix: 4000,
+  motionThr: 14,  // brightness change (0-255) that counts as movement
+  minScore: 0.04, // how ball-like a blob must be to keep following it
+  minStartScore: 0.15, // ...and to start following it
 };
 
 export const KINDS = {
@@ -44,78 +47,201 @@ export function ellipseDist(x, y, e) {
   return Math.hypot((x - e.cx) / e.rx, (y - e.cy) / e.ry);
 }
 
+// Finds ball-colored blobs in one frame. Each pixel is checked for the ball's color and for
+// movement against a slowly updated picture of the background, then touching pixels are grouped.
 export class BallDetector {
   constructor(W = 320, H = 180) { this.resize(W, H); }
 
   resize(W, H) {
-    this.W = W; this.H = H; this.CS = 6;
-    this.gw = Math.ceil(W / this.CS); this.gh = Math.ceil(H / this.CS);
-    this.cells = new Uint16Array(this.gw * this.gh);
-    this.mask = new Uint8Array(W * H);
+    this.W = W; this.H = H;
+    const N = W * H;
+    this.mask = new Uint8Array(N);
+    this.move = new Uint8Array(N);
+    this.labels = new Int32Array(N);
+    this.stack = new Int32Array(N);
+    this.bg = null;
+    this.globalMotion = 0;
   }
 
-  // data: RGBA pixels of the W×H frame. roi: {x0,x1,y0,y1}. pred: {x,y,r} near where we expect the ball, or null.
-  detect(data, s, roi, pred) {
-    const { W, H, CS, gw, gh, cells, mask } = this;
-    cells.fill(0);
-    mask.fill(0);
-    const x0 = Math.max(0, roi.x0 | 0), x1 = Math.min(W, Math.ceil(roi.x1));
-    const y0 = Math.max(0, roi.y0 | 0), y1 = Math.min(H, Math.ceil(roi.y1));
-    const hue = s.hue, tol = s.hueTol, minS = s.minSat, minV = s.minVal * 255;
+  resetBackground() { this.bg = null; }
 
-    for (let y = y0; y < y1; y++) {
-      let i = (y * W + x0) * 4;
-      const row = ((y / CS) | 0) * gw;
-      for (let x = x0; x < x1; x++, i += 4) {
-        const r = data[i], g = data[i + 1], b = data[i + 2];
-        const mx = r > g ? (r > b ? r : b) : (g > b ? g : b);
-        if (mx < minV) continue;
-        const mn = r < g ? (r < b ? r : b) : (g < b ? g : b);
-        const c = mx - mn;
-        if (c < minS * mx || c === 0) continue;
-        let h;
-        if (mx === r) h = ((g - b) / c) % 6;
-        else if (mx === g) h = (b - r) / c + 2;
-        else h = (r - g) / c + 4;
-        h *= 60;
-        if (h < 0) h += 360;
-        let dh = h > hue ? h - hue : hue - h;
-        if (dh > 180) dh = 360 - dh;
-        if (dh > tol) continue;
-        mask[y * W + x] = 1;
-        cells[row + ((x / CS) | 0)]++;
+  blobs(data, s) {
+    const { W, H, mask, move, labels, stack } = this;
+    const N = W * H;
+    const first = !this.bg;
+    if (first) this.bg = new Float32Array(N);
+    const bg = this.bg;
+    const hue = s.hue, tol = s.hueTol;
+    const minS = s.minSat, weakS = s.minSat * 0.55;
+    const minV = s.minVal * 255, weakV = minV * 0.7;
+    const mThr = s.motionThr;
+    let moving = 0;
+
+    for (let p = 0, i = 0; p < N; p++, i += 4) {
+      const r = data[i], g = data[i + 1], b = data[i + 2];
+      const y = (r * 77 + g * 150 + b * 29) >> 8;
+      let m = 0;
+      if (first) bg[p] = y;
+      else {
+        const dy = y - bg[p];
+        if (dy > mThr || dy < -mThr) m = 1;
+        bg[p] += dy * 0.06;
       }
-    }
+      move[p] = m;
+      moving += m;
+      mask[p] = 0;
 
-    // Pick the densest 3×3 block of cells, favoring blocks near where the ball was last seen.
-    let best = -1, bestScore = 0;
-    for (let cy = 0; cy < gh; cy++) {
-      for (let cx = 0; cx < gw; cx++) {
-        if (!cells[cy * gw + cx]) continue;
-        let sum = 0;
-        for (let yy = Math.max(0, cy - 1); yy <= Math.min(gh - 1, cy + 1); yy++)
-          for (let xx = Math.max(0, cx - 1); xx <= Math.min(gw - 1, cx + 1); xx++) sum += cells[yy * gw + xx];
-        if (sum < s.minPix) continue;
-        let score = sum;
-        if (pred) {
-          const dx = (cx + 0.5) * CS - pred.x, dy = (cy + 0.5) * CS - pred.y;
-          score *= 0.3 + Math.exp(-(dx * dx + dy * dy) / (2 * pred.r * pred.r));
+      const mx = r > g ? (r > b ? r : b) : (g > b ? g : b);
+      if (mx < weakV) continue;
+      const mn = r < g ? (r < b ? r : b) : (g < b ? g : b);
+      const c = mx - mn;
+      if (c === 0 || c < weakS * mx) continue;
+      let h;
+      if (mx === r) h = ((g - b) / c) % 6;
+      else if (mx === g) h = (b - r) / c + 2;
+      else h = (r - g) / c + 4;
+      h *= 60;
+      if (h < 0) h += 360;
+      let dh = h > hue ? h - hue : hue - h;
+      if (dh > 180) dh = 360 - dh;
+      if (dh > tol) continue;
+      // Fully ball-colored, or a paler match that is moving (motion blur washes the color out).
+      if ((mx >= minV && c >= minS * mx) || m) mask[p] = 1;
+    }
+    this.globalMotion = first ? 0 : moving / N;
+
+    labels.fill(0);
+    const out = [];
+    let id = 0;
+    for (let p = 0; p < N; p++) {
+      if (!mask[p] || labels[p]) continue;
+      id++;
+      let sp = 0;
+      stack[sp++] = p;
+      labels[p] = id;
+      let n = 0, sx = 0, sy = 0, mv = 0, x0 = W, x1 = 0, y0 = H, y1 = 0;
+      while (sp) {
+        const q = stack[--sp];
+        const x = q % W, y = (q / W) | 0;
+        n++; sx += x; sy += y; mv += move[q];
+        if (x < x0) x0 = x; if (x > x1) x1 = x;
+        if (y < y0) y0 = y; if (y > y1) y1 = y;
+        for (let dy = -1; dy <= 1; dy++) {
+          const ny = y + dy;
+          if (ny < 0 || ny >= H) continue;
+          for (let dx = -1; dx <= 1; dx++) {
+            const nx = x + dx;
+            if (nx < 0 || nx >= W) continue;
+            const nq = ny * W + nx;
+            if (mask[nq] && !labels[nq]) { labels[nq] = id; stack[sp++] = nq; }
+          }
         }
-        if (score > bestScore) { bestScore = score; best = cy * gw + cx; }
       }
+      if (n >= s.minPix && n <= s.maxPix) out.push({ n, x: sx / n, y: sy / n, w: x1 - x0 + 1, h: y1 - y0 + 1, mv: mv / n });
+      if (out.length > 300) break;
     }
-    if (best < 0) return null;
+    return out;
+  }
+}
 
-    const bx = best % gw, by = (best / gw) | 0;
-    const wx0 = Math.max(0, (bx - 3) * CS), wx1 = Math.min(W, (bx + 4) * CS);
-    const wy0 = Math.max(0, (by - 3) * CS), wy1 = Math.min(H, (by + 4) * CS);
-    let n = 0, sx = 0, sy = 0;
-    for (let y = wy0; y < wy1; y++) {
-      const o = y * W;
-      for (let x = wx0; x < wx1; x++) if (mask[o + x]) { n++; sx += x; sy += y; }
+// Follows one ball from frame to frame. Every blob is scored on how ball-like it is: the right
+// size for a ball next to this rim, round, moving, and close to where the last frames say the
+// ball should be now. A new track only starts on something that is moving, so still yellow
+// things (cones, shoes, sunny grass) are ignored.
+export class BallTracker {
+  constructor(settings) {
+    this.s = settings;
+    this.detector = new BallDetector();
+    this.track = null;
+    this.ignore = []; // spots where something yellow sat still: not the ball
+  }
+
+  resize(W, H) { this.detector.resize(W, H); this.track = null; }
+
+  reset() { this.detector.resetBackground(); this.track = null; this.ignore = []; }
+
+  get mask() { return this.detector.mask; }
+
+  // e: rim ellipse in frame pixels. Returns {x, y, r, n, score} or null.
+  update(data, t, e) {
+    const s = this.s;
+    const blobs = this.detector.blobs(data, s);
+    // A Spikeball is about 9.7 cm across and the rim about 91 cm, so the ball's radius is ~0.107 of the rim's.
+    const expR = Math.max(1.5, 0.107 * e.rx);
+    const g = 21.5 * e.rx; // gravity in pixels per second², using the rim as the ruler
+
+    let tr = this.track;
+    if (tr && (t - tr.t > 350 || t < tr.t)) tr = this.track = null;
+    let pred = null;
+    if (tr) {
+      const dt = (t - tr.t) / 1000;
+      const speed = Math.hypot(tr.vx, tr.vy);
+      pred = {
+        x: tr.x + tr.vx * dt,
+        y: tr.y + tr.vy * dt + 0.5 * g * dt * dt,
+        sig: Math.min(6 * expR, 2.5 * expR + 0.8 * speed * dt + 0.5 * g * dt * dt),
+      };
     }
-    if (n < s.minPix || n > s.maxPix) return null;
-    return { x: sx / n, y: sy / n, n, r: Math.sqrt(n / Math.PI) };
+    const motionOK = this.detector.globalMotion < 0.25; // a shaking camera makes everything look like it moves
+    const trackSlow = tr && Math.hypot(tr.vx, tr.vy) < 8 * expR;
+
+    let best = null, bestScore = 0;
+    for (const b of blobs) {
+      const r = Math.sqrt(b.n / Math.PI);
+      const lr = Math.log(r / expR);
+      const size = Math.exp(-(lr * lr) / (2 * 0.55 * 0.55));
+      const fill = b.n / (b.w * b.h);
+      const elong = Math.max(b.w, b.h) / Math.min(b.w, b.h);
+      // A ball stays round (a little stretched when it's fast); shoes, arms and shirts don't.
+      const shape = Math.min(1, fill / 0.55) * (elong <= 1.7 ? 1 : elong <= 2.6 ? 0.45 : 0.12);
+      const motion = motionOK ? 0.25 + 0.75 * Math.min(1, b.mv * 1.5) : 0.7;
+      // In play the ball is at net height or above. Well below the rim is where feet are.
+      const below = (b.y - (e.cy + e.ry)) / e.rx;
+      const height = below > 0.15 ? 0.3 : 1;
+      let near = 1, gate = 0;
+      if (pred) {
+        const d = Math.hypot(b.x - pred.x, b.y - pred.y);
+        gate = Math.exp(-(d * d) / (2 * pred.sig * pred.sig));
+        near = 0.3 + 0.7 * gate;
+      }
+      // Anything away from where the ball was heading counts as a fresh start, with the same rules.
+      // Only something right on the path of a ball that was already slowing down may be motionless
+      // (a ball at the top of its arc, or settling on the net). A fresh start must look clearly like a ball.
+      let minScore = s.minScore;
+      if (gate < 0.05 || (b.mv < 0.25 && !(gate >= 0.5 && trackSlow))) {
+        if (motionOK && b.mv < 0.25) continue;
+        if (this.ignore.some((z) => t < z.until && Math.hypot(b.x - z.x, b.y - z.y) < 3 * expR)) continue;
+        minScore = s.minStartScore;
+      }
+      const score = size * shape * motion * height * near;
+      if (score >= minScore && score > bestScore) { bestScore = score; best = { b, r }; }
+    }
+
+    if (!best) return null;
+    const { b } = best;
+    if (tr) {
+      const dt = (t - tr.t) / 1000;
+      if (dt > 0) {
+        const vx = (b.x - tr.x) / dt, vy = (b.y - tr.y) / dt;
+        tr.vx = tr.vx * 0.3 + vx * 0.7;
+        tr.vy = tr.vy * 0.3 + vy * 0.7;
+      }
+      tr.x = b.x; tr.y = b.y; tr.t = t;
+      // Something that has sat still for a while is not a ball in play. Let go of it.
+      if (tr.anchor && Math.hypot(b.x - tr.anchor.x, b.y - tr.anchor.y) < 1.2 * expR) {
+        if (t - tr.anchor.t > 600) {
+          this.ignore = this.ignore.filter((z) => t < z.until);
+          this.ignore.push({ x: b.x, y: b.y, until: t + 4000 });
+          this.track = null;
+          return null;
+        }
+      } else tr.anchor = { x: b.x, y: b.y, t };
+    } else {
+      this.track = { x: b.x, y: b.y, vx: 0, vy: 0, t, anchor: { x: b.x, y: b.y, t } };
+    }
+    // Radius from the blob's narrow side: motion blur stretches a fast ball along its path only.
+    const r = Math.min(b.w, b.h) / 2;
+    return { x: b.x, y: b.y, r, n: b.n, score: bestScore };
   }
 }
 

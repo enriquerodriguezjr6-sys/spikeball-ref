@@ -1,5 +1,5 @@
 // Keeps the app working at the park with no signal. Bump VERSION when files change.
-const VERSION = 'spikeref-v1';
+const VERSION = 'spikeref-v2';
 const FILES = ['./', 'index.html', 'style.css', 'app.js', 'tracker.js', 'demo.js', 'manifest.webmanifest', 'icons/icon-180.png', 'icons/icon-192.png', 'icons/icon-512.png'];
 
 self.addEventListener('install', (e) => {
