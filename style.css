@@ -120,7 +120,24 @@ button:focus-visible, .btn:focus-visible, input:focus-visible, select:focus-visi
   display: grid; gap: 14px; align-content: start;
 }
 .sheet > * { width: 100%; max-width: 760px; margin: 0 auto; }
-.sheet.full { top: 0; max-height: none; border-radius: 0; padding-top: calc(12px + env(safe-area-inset-top, 0px)); grid-template-rows: auto 1fr auto auto; }
+.sheet.full {
+  top: 0; max-height: none; border-radius: 0; padding-top: calc(12px + env(safe-area-inset-top, 0px)); gap: 10px; overflow: hidden;
+  grid-template-columns: minmax(0, 1fr); grid-template-rows: auto minmax(0, 1fr) auto auto;
+  grid-template-areas: "head" "view" "bottom" "call";
+}
+.sheet.full > * { max-width: none; }
+.sheet.full .sheethead { grid-area: head; }
+.sheet.full .replaywrap { grid-area: view; }
+.sheet.full .rbottom { grid-area: bottom; display: grid; gap: 8px; }
+.sheet.full .callpanel { grid-area: call; }
+/* Phone on its side: picture on the left, the call on the right */
+@media (orientation: landscape) and (max-height: 600px) {
+  .sheet.full {
+    grid-template-columns: minmax(0, 1fr) minmax(250px, 36%); grid-template-rows: auto minmax(0, 1fr) auto;
+    grid-template-areas: "head head" "view call" "bottom call";
+  }
+  .sheet.full .callpanel { overflow-y: auto; align-content: start; }
+}
 .sheethead { display: flex; justify-content: space-between; align-items: center; gap: 10px; }
 .sheethead h2 { font-family: var(--display); font-weight: 800; font-size: 1.5rem; text-transform: uppercase; margin: 0; letter-spacing: .03em; }
 .field { display: grid; gap: 8px; }
@@ -137,6 +154,28 @@ input[type="range"] { width: 100%; accent-color: var(--ball); flex: 1; min-width
 .scrubwrap { position: relative; padding-top: 10px; }
 .ticks { position: absolute; left: 10px; right: 10px; top: 0; height: 10px; }
 .ticks i { position: absolute; top: 0; width: 3px; height: 10px; border-radius: 2px; background: var(--fault); transform: translateX(-1px); }
+#replayCanvas { cursor: zoom-in; touch-action: manipulation; }
+.zoombtns { position: absolute; right: 10px; bottom: 10px; display: flex; gap: 4px; }
+.zoombtns button { min-height: 32px; padding: 2px 10px; font-size: .8rem; background: rgba(21,27,35,.85); }
+.zoombtns button.on { background: var(--ink); color: var(--bg); }
+.callpanel { display: grid; gap: 8px; align-content: start; min-height: 0; }
+.camcall { margin: 0; font-size: .9rem; color: var(--muted); }
+.camcall b { color: var(--fault); font-family: var(--display); font-size: 1.15rem; text-transform: uppercase; letter-spacing: .03em; margin-left: 4px; }
+.camcall span { margin-left: 8px; color: var(--ball); font-size: .8rem; }
+.whats { gap: 6px; }
+.whats button { min-height: 36px; padding: 4px 11px; font-size: .88rem; }
+.whats button.bad.on { background: var(--fault); border-color: var(--fault); color: #fff; }
+.whats button.good.on { background: var(--legal); border-color: var(--legal); color: #06210f; }
+.pointrow button { flex: 1; min-width: 7.5em; min-height: 46px; }
+
+.replaybtn {
+  position: absolute; right: max(12px, env(safe-area-inset-right, 0px)); bottom: 12px; width: 68px; height: 68px; border-radius: 50%;
+  display: grid; place-content: center; gap: 0; padding: 0; line-height: 1;
+  background: rgba(21,27,35,.85); border: 2px solid var(--ball); color: var(--ball); box-shadow: 0 6px 18px rgba(0,0,0,.4);
+}
+.replaybtn b { font-size: 1.6rem; font-weight: 600; }
+.replaybtn span { font-family: var(--display); font-weight: 600; font-size: .75rem; text-transform: uppercase; letter-spacing: .06em; }
+.replaybtn:active { transform: scale(.96); }
 
 .cats button { font-size: .85rem; min-height: 34px; padding: 4px 12px; }
 .calls { display: grid; gap: 8px; }
@@ -174,3 +213,8 @@ td button { min-height: 30px; padding: 2px 8px; font-size: .8rem; }
   .score { font-size: 2.1rem; min-width: 1.8em; }
 }
 @media (prefers-reduced-motion: reduce) { .banner { animation: none; } .toast { transition: none; } }
+@media (max-width: 480px) {
+  .rbottom .row { gap: 5px; }
+  .rbottom .row button { padding: 6px 9px; min-width: 0; }
+  .logwrap th:first-child, #logBody td:first-child { display: none; }
+}

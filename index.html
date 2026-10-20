@@ -69,18 +69,20 @@
       </div>
     </div>
     <div class="chip" id="chip" hidden></div>
+    <button class="replaybtn" id="liveReplay" hidden aria-label="Replay the last few seconds"><b>↺</b><span>Replay</span></button>
   </main>
 
   <nav class="tools" id="tools" aria-label="Tools">
     <button data-open="rim"><b>Rim</b><small>set oval</small></button>
     <button data-open="color"><b>Ball</b><small>set color</small></button>
-    <button data-open="replay"><b>Replay</b><small>last 2.5 s</small></button>
+    <button data-open="replay"><b>Replay</b><small>last 4 s</small></button>
     <button data-open="calls"><b>Calls</b><small>rules</small></button>
     <button data-open="log"><b>Log</b><small id="logCount">0 calls</small></button>
     <button data-open="settings"><b>Setup</b><small>tune</small></button>
   </nav>
   <nav class="tools mode" id="modeBar" hidden>
     <span id="modeHint">Drag the oval onto the rim.</span>
+    <button id="modeAuto">Auto-fit</button>
     <button class="primary" id="modeDone">Done</button>
   </nav>
 </div>
@@ -91,17 +93,42 @@
     <h2>Instant replay</h2>
     <button class="close" data-close>Back to live</button>
   </div>
-  <div class="replaywrap"><canvas id="replayCanvas"></canvas><span class="rtime" id="rTime">0.00 s</span><span class="rspeed" id="rSpeedTag">¼×</span></div>
-  <div class="scrubwrap"><div class="ticks" id="rTicks"></div><input type="range" id="rScrub" min="0" max="0" value="0" aria-label="Scrub replay"></div>
-  <div class="row">
-    <button id="rBack">◀ frame</button>
-    <button class="primary" id="rPlay">Pause</button>
-    <button id="rFwd">frame ▶</button>
-    <span class="grow"></span>
-    <button data-rspeed="0.1">0.1×</button>
-    <button data-rspeed="0.25">¼×</button>
-    <button data-rspeed="0.5">½×</button>
-    <button data-rspeed="1">1×</button>
+  <div class="replaywrap">
+    <canvas id="replayCanvas" aria-label="Replay. Tap to zoom in on a spot."></canvas>
+    <span class="rtime" id="rTime">0.00 s</span><span class="rspeed" id="rSpeedTag">¼×</span>
+    <div class="zoombtns" role="group" aria-label="Zoom"><button data-zoom="1" class="on">1×</button><button data-zoom="2">2×</button><button data-zoom="4">4×</button></div>
+  </div>
+  <div class="rbottom">
+    <div class="scrubwrap"><div class="ticks" id="rTicks"></div><input type="range" id="rScrub" min="0" max="0" value="0" aria-label="Scrub replay"></div>
+    <div class="row">
+      <button id="rBack" aria-label="Back one frame">◀</button>
+      <button class="primary" id="rPlay">Pause</button>
+      <button id="rFwd" aria-label="Forward one frame">▶</button>
+      <span class="grow"></span>
+      <button data-rspeed="0.1">0.1×</button>
+      <button data-rspeed="0.25">¼×</button>
+      <button data-rspeed="0.5">½×</button>
+      <button data-rspeed="1">1×</button>
+    </div>
+  </div>
+  <div class="callpanel">
+    <p class="camcall" id="camCall" hidden>Camera called <b id="camKind">Rim hit</b><span id="camNear"></span></p>
+    <span class="label">What happened?</span>
+    <div class="row whats" id="whatRow" role="radiogroup" aria-label="What happened">
+      <button data-what="Rim hit" class="bad">Rim</button>
+      <button data-what="Roll-up" class="bad">Roll-up</button>
+      <button data-what="Double bounce" class="bad">Double bounce</button>
+      <button data-what="Hit the ground" class="bad">Ground</button>
+      <button data-what="Other fault" class="bad">Other fault</button>
+      <button data-what="Clean hit" class="good">Clean hit</button>
+      <button data-what="Pocket" class="good">Pocket</button>
+    </div>
+    <span class="label">Your call</span>
+    <div class="row pointrow">
+      <button class="primary" id="rPointA">Point Team A</button>
+      <button class="primary" id="rPointB">Point Team B</button>
+      <button id="rRedo">Replay the point</button>
+    </div>
   </div>
 </section>
 

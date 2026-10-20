@@ -1,5 +1,6 @@
 import { DEFAULTS, KINDS, BallTracker, NetJudge, rgbToHsv } from './tracker.js';
 import { DemoScene } from './demo.js';
+import { findRims, fitRimMedian } from './rimfit.js';
 
 const $ = (id) => document.getElementById(id);
 const store = {
@@ -77,7 +78,7 @@ let stream = null;
 
 function srcW() { return src.kind === 'demo' ? demoCanvas.width : video.videoWidth; }
 function srcH() { return src.kind === 'demo' ? demoCanvas.height : video.videoHeight; }
-function rim() { return src.kind === 'demo' ? demo.rimNorm : rims[src.kind]; }
+function rim() { return rims[src.kind]; }
 
 function showStartError(msg) {
   const el = $('startError');
@@ -110,7 +111,7 @@ async function startCamera() {
     video.srcObject = s;
     await video.play();
     setSource('camera');
-    if (!store.get('sr.rimSet', false)) setMode('rim');
+    if (!store.get('sr.rimSet', false)) { setMode('rim'); setTimeout(() => autoFit(), 700); }
   } catch (e) {
     showStartError(e && e.name === 'NotAllowedError'
       ? 'Camera access is blocked. On iPhone go to Settings › Safari › Camera, choose Allow, then tap Start camera again.'
@@ -126,14 +127,15 @@ async function startClip(file) {
   video.loop = true;
   try { await video.play(); } catch {}
   setSource('file');
-  toast('Drag the oval onto the rim in this clip');
   setMode('rim');
+  setTimeout(() => autoFit(), 700);
 }
 
 function startDemo() {
   unlockAudio();
   stopSource();
   if (!demo) demo = new DemoScene(demoCanvas);
+  rims.demo = { ...demo.rimNorm };
   setSource('demo');
 }
 
@@ -148,6 +150,7 @@ function setSource(kind) {
   clearBuffer();
   trail.length = 0;
   document.querySelectorAll('[data-src]').forEach((b) => b.classList.toggle('on', b.dataset.src === kind));
+  $('liveReplay').hidden = false;
   requestWake();
   runLoop(++gen);
 }
@@ -379,9 +382,13 @@ function setMode(mode) {
   $('tools').hidden = !!mode;
   $('modeBar').hidden = !mode;
   $('modeHint').textContent = mode === 'rim'
-    ? (src && src.kind === 'demo' ? 'The demo rim is already set. Tap Done.' : 'Drag the oval onto the rim. Pull the dots to fit the width and depth.')
+    ? 'Tap Auto-fit, or drag the oval onto the rim and pull the dots to fit.'
     : 'Set the ball on the net so it is still, then tap it.';
   $('modeDone').textContent = mode === 'color' ? 'Cancel' : 'Done';
+  $('modeAuto').hidden = mode !== 'rim';
+  $('modeAuto').textContent = 'Auto-fit';
+  $('liveReplay').hidden = !!mode || !src;
+  rimGuesses = [];
   judge.reset();
   tracker.reset();
   if (src) drawOverlay(null);
@@ -389,6 +396,7 @@ function setMode(mode) {
 
 $('modeDone').onclick = () => {
   if (ui.mode === 'rim' && src && src.kind !== 'demo') { saveRims(); store.set('sr.rimSet', true); toast('Rim saved'); }
+  fitting = false;
   setMode(null);
 };
 
@@ -402,7 +410,6 @@ overlay.addEventListener('pointerdown', (ev) => {
   if (!src || !ui.mode) return;
   const p = toNorm(ev);
   if (ui.mode === 'color') { sampleColor(p); return; }
-  if (src.kind === 'demo') return;
   const R = rim(), h = handles(contentRect(), R);
   let best = null, bd = 44;
   for (const [k, [x, y]] of Object.entries(h)) {
@@ -436,6 +443,64 @@ overlay.addEventListener('pointermove', (ev) => {
 });
 overlay.addEventListener('pointerup', () => { drag = null; });
 overlay.addEventListener('pointercancel', () => { drag = null; });
+
+// Auto-fit: looks at five frames for the dark oval of the net and keeps the middle answer, so a
+// ball or player crossing the net in one frame doesn't throw it off. Pressing again steps
+// through other ovals it found, in case it picked a shadow.
+const fitCanvas = document.createElement('canvas');
+const fctx = fitCanvas.getContext('2d', { willReadFrequently: true });
+let rimGuesses = [], guessIdx = 0, fitting = false;
+
+function grabRims() {
+  const sw = srcW(), sh = srcH();
+  if (!sw || !sh) return [];
+  const W = 320, H = Math.max(1, Math.round((320 * sh) / sw));
+  fitCanvas.width = W; fitCanvas.height = H;
+  fctx.drawImage(src.el, 0, 0, W, H);
+  return findRims(fctx.getImageData(0, 0, W, H).data, W, H);
+}
+
+function applyRim(g) {
+  const R = rim();
+  R.cx = g.cx; R.cy = g.cy; R.rx = g.rx; R.ry = g.ry;
+  drawOverlay(null);
+}
+
+async function autoFit() {
+  if (!src || ui.mode !== 'rim' || fitting) return;
+  if (rimGuesses.length > 1) {
+    guessIdx = (guessIdx + 1) % rimGuesses.length;
+    applyRim(rimGuesses[guessIdx]);
+    $('modeHint').textContent = `Guess ${guessIdx + 1} of ${rimGuesses.length}. Tap Done when it sits on the rim.`;
+    return;
+  }
+  fitting = true;
+  $('modeHint').textContent = 'Looking for the rim…';
+  const runs = [];
+  for (let i = 0; i < 5; i++) {
+    runs.push(grabRims());
+    await new Promise((r) => setTimeout(r, 120));
+  }
+  fitting = false;
+  if (ui.mode !== 'rim') return;
+  const best = fitRimMedian(runs.map((r) => r[0] || null));
+  const last = runs[runs.length - 1];
+  rimGuesses = best
+    ? [best, ...last.filter((c) => Math.abs(c.cx - best.cx) > best.rx * 0.25 || Math.abs(c.cy - best.cy) > best.rx * 0.15)]
+    : last;
+  guessIdx = 0;
+  if (!rimGuesses.length) {
+    $('modeHint').textContent = "Couldn't find the rim. Drag the oval onto it, or move the phone so the whole net shows.";
+    $('modeAuto').textContent = 'Try again';
+    return;
+  }
+  applyRim(rimGuesses[0]);
+  $('modeHint').textContent = rimGuesses.length > 1
+    ? 'Found it. If the oval is on the wrong thing, tap Next guess.'
+    : 'Found the rim. Nudge the oval if needed, then tap Done.';
+  $('modeAuto').textContent = rimGuesses.length > 1 ? 'Next guess' : 'Auto-fit';
+}
+$('modeAuto').onclick = () => autoFit();
 
 const sampler = document.createElement('canvas');
 sampler.width = sampler.height = 9;
@@ -477,7 +542,7 @@ function onEvent(ev, pos, bufT) {
   }
   const entry = {
     id: Date.now() + Math.random(), at: Date.now(), label: K.label, verdict: 'fault', auto: true,
-    near: ev.near, score: `${game.A}–${game.B}`, result: 'Flagged', bufT,
+    near: ev.near, score: `${game.A}–${game.B}`, result: 'Flagged', bufT, u: pos.u, v: pos.v,
   };
   game.log.push(entry);
   saveGame();
@@ -502,7 +567,8 @@ function resolveBanner(result, team) {
 $('bPointA').onclick = () => resolveBanner('Point ' + nameOf('A'), 'A');
 $('bPointB').onclick = () => resolveBanner('Point ' + nameOf('B'), 'B');
 $('bIgnore').onclick = () => resolveBanner('Ignored');
-$('bReplay').onclick = () => openReplay(bannerEntry ? bannerEntry.bufT : null);
+$('bReplay').onclick = () => openReplay(bannerEntry ? bannerEntry.bufT : null, bannerEntry);
+$('liveReplay').onclick = () => openReplay(null);
 
 function showChip(text) {
   const c = $('chip');
@@ -537,7 +603,7 @@ function whistle() {
 
 /* ---------- Replay buffer ---------- */
 
-const CAP = 150;   // frames kept: about 2.5 s at 60 fps
+const CAP = 240;   // frames kept: 4 s at 60 fps, 8 s at 30
 const RW = 400;    // replay frame width in pixels
 const pool = [];
 let head = 0, count = 0;
@@ -564,8 +630,11 @@ function bufferFrames() {
 
 let replay = null;
 const rc = $('replayCanvas'), rctx = rc.getContext('2d');
+const GOOD_CALLS = new Set(['Clean hit', 'Pocket']);
 
-function openReplay(focusT) {
+// focusT: the moment to center on (a flagged contact), or null for "the last few seconds".
+// entry: the log entry being reviewed, if any; the call made here updates it.
+function openReplay(focusT, entry = null) {
   const fr = bufferFrames();
   if (fr.length < 2) { toast('Nothing recorded yet'); return; }
   if (src.kind === 'file') video.pause();
@@ -573,15 +642,32 @@ function openReplay(focusT) {
   if (focusT != null && focusT >= fr[0].t && focusT <= fr[fr.length - 1].t + 50) {
     focus = focusT;
     while (start < fr.length - 1 && fr[start + 1].t < focusT - 700) start++;
+  } else {
+    const from = fr[fr.length - 1].t - 3000;
+    while (start < fr.length - 1 && fr[start + 1].t < from) start++;
   }
-  replay = { fr, i: start, start, focus, cursor: fr[start].t, playing: true, speed: 0.25, lastNow: null };
+  replay = {
+    fr, i: start, start, focus, cursor: fr[start].t, playing: true, speed: 0.25, lastNow: null,
+    entry, what: entry && entry.auto ? entry.label : null,
+    zoom: 1, zc: entry && entry.u != null ? { u: entry.u, v: entry.v } : null,
+  };
   closeSheets();
+  $('banner').hidden = true;
   $('sheet-replay').hidden = false;
-  const span = fr[fr.length - 1].t - fr[0].t;
+  const span = fr[fr.length - 1].t - fr[0].t || 1;
   $('rScrub').max = fr.length - 1;
   $('rTicks').innerHTML = game.log
     .filter((e) => e.bufT != null && e.bufT >= fr[0].t && e.bufT <= fr[fr.length - 1].t)
     .map((e) => `<i style="left:${((e.bufT - fr[0].t) / span) * 100}%" title="${esc(e.label)}"></i>`).join('');
+  $('camCall').hidden = !(entry && entry.auto);
+  if (entry && entry.auto) {
+    $('camKind').textContent = entry.label;
+    $('camNear').textContent = entry.near ? 'Close call' : '';
+  }
+  $('rPointA').textContent = 'Point ' + nameOf('A');
+  $('rPointB').textContent = 'Point ' + nameOf('B');
+  renderWhat();
+  setZoom(1);
   setReplaySpeed(0.25);
   requestAnimationFrame(replayTick);
 }
@@ -595,6 +681,94 @@ function closeReplay() {
   trail.length = 0;
   if (src && src.kind === 'file') video.play().catch(() => {});
 }
+
+function renderWhat() {
+  document.querySelectorAll('[data-what]').forEach((b) => {
+    const on = replay && replay.what === b.dataset.what;
+    b.classList.toggle('on', on);
+    b.setAttribute('aria-checked', on);
+  });
+}
+$('whatRow').onclick = (e) => {
+  const b = e.target.closest('[data-what]');
+  if (!b || !replay) return;
+  replay.what = replay.what === b.dataset.what ? null : b.dataset.what;
+  renderWhat();
+};
+
+// The ref's ruling from the replay. Updates the flagged entry it came from, or logs a new one.
+function replayCall(team) {
+  const R = replay;
+  if (!R) return;
+  const result = team ? 'Point ' + nameOf(team) : 'Replay point';
+  if (team) award(team);
+  const f = R.fr[R.i];
+  let entry = R.entry;
+  if (entry) {
+    if (R.what && R.what !== entry.label) entry.overturned = entry.label;
+    if (R.what) entry.label = R.what;
+    entry.verdict = GOOD_CALLS.has(entry.label) ? 'legal' : team ? 'fault' : 'replay';
+    entry.result = result;
+    entry.reviewed = true;
+  } else {
+    entry = {
+      id: Date.now(), at: Date.now(), label: R.what || 'Reviewed play', auto: false, reviewed: true,
+      verdict: R.what && GOOD_CALLS.has(R.what) ? 'legal' : team ? 'fault' : 'replay',
+      score: `${game.A}–${game.B}`, result, bufT: R.focus != null ? R.focus : f.t,
+      u: R.zc ? R.zc.u : f.norm ? f.norm.u : null, v: R.zc ? R.zc.v : f.norm ? f.norm.v : null,
+    };
+    game.log.push(entry);
+  }
+  if (entry === bannerEntry) bannerEntry = null;
+  saveGame();
+  renderScore();
+  closeReplay();
+  toast(R.what ? `${R.what}: ${result}` : result);
+}
+$('rPointA').onclick = () => replayCall('A');
+$('rPointB').onclick = () => replayCall('B');
+$('rRedo').onclick = () => replayCall(null);
+
+function setZoom(z) {
+  if (!replay) return;
+  replay.zoom = z;
+  document.querySelectorAll('[data-zoom]').forEach((b) => b.classList.toggle('on', +b.dataset.zoom === z));
+}
+document.querySelectorAll('[data-zoom]').forEach((b) => (b.onclick = () => setZoom(+b.dataset.zoom)));
+
+// Where the zoomed view centers: a spot the ref tapped, else the flagged contact, else the ball, else the rim.
+function zoomCenter(f) {
+  const R = replay;
+  if (R.zc) return R.zc;
+  if (f.norm) return { u: f.norm.u, v: f.norm.v };
+  const r = rim();
+  return { u: r.cx, v: r.cy };
+}
+
+// Frame-to-screen mapping for the current zoom: screen = x + u * w, like contentRect().
+function replayView(f) {
+  const w = rc.clientWidth, h = rc.clientHeight;
+  const sc = Math.min(w / f.c.width, h / f.c.height);
+  const base = { w: f.c.width * sc, h: f.c.height * sc };
+  base.x = (w - base.w) / 2; base.y = (h - base.h) / 2;
+  const z = replay.zoom;
+  if (z === 1) return { base, view: base };
+  const c = zoomCenter(f);
+  const u0 = Math.min(1 - 1 / z, Math.max(0, c.u - 0.5 / z));
+  const v0 = Math.min(1 - 1 / z, Math.max(0, c.v - 0.5 / z));
+  return { base, view: { x: base.x - u0 * z * base.w, y: base.y - v0 * z * base.h, w: base.w * z, h: base.h * z } };
+}
+
+rc.addEventListener('click', (ev) => {
+  if (!replay) return;
+  const f = replay.fr[replay.i];
+  const { base, view } = replayView(f);
+  const r = rc.getBoundingClientRect();
+  const x = ev.clientX - r.left, y = ev.clientY - r.top;
+  if (x < base.x || y < base.y || x > base.x + base.w || y > base.y + base.h) return;
+  replay.zc = { u: (x - view.x) / view.w, v: (y - view.y) / view.h };
+  if (replay.zoom === 1) setZoom(2);
+});
 
 function replayTick(now) {
   const R = replay;
@@ -617,9 +791,12 @@ function drawReplay() {
   rctx.fillStyle = '#000';
   rctx.fillRect(0, 0, w, h);
   const f = R.fr[R.i];
-  const sc = Math.min(w / f.c.width, h / f.c.height);
-  const cr = { w: f.c.width * sc, h: f.c.height * sc };
-  cr.x = (w - cr.w) / 2; cr.y = (h - cr.h) / 2;
+  const { base, view: cr } = replayView(f);
+  rctx.save();
+  rctx.beginPath();
+  rctx.rect(base.x, base.y, base.w, base.h);
+  rctx.clip();
+  rctx.imageSmoothingEnabled = R.zoom < 4;
   rctx.drawImage(f.c, cr.x, cr.y, cr.w, cr.h);
   drawRim(rctx, cr, rim(), { zones: true });
   rctx.lineCap = 'round';
@@ -640,10 +817,11 @@ function drawReplay() {
     rctx.lineWidth = 2;
     rctx.stroke();
   }
+  rctx.restore();
   if (R.focus != null && Math.abs(f.t - R.focus) < 40) {
     rctx.font = '800 26px "Barlow Condensed", system-ui, sans-serif';
     rctx.fillStyle = '#ff5a4f';
-    rctx.fillText('CONTACT', cr.x + 14, cr.y + 34);
+    rctx.fillText('CONTACT', base.x + 14, base.y + 34);
   }
   const t0 = R.focus != null ? R.focus : R.fr[R.fr.length - 1].t;
   const rel = (f.t - t0) / 1000;
@@ -746,13 +924,17 @@ function renderLog() {
   $('logBody').innerHTML = rows.length ? rows.map((e) => `<tr>
       <td class="num">${new Date(e.at).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit', second: '2-digit' })}</td>
       <td class="num">${esc(e.score)}</td>
-      <td>${esc(e.label)}${e.auto ? '<span class="auto">auto</span>' : ''}</td>
+      <td>${esc(e.label)}${e.auto ? '<span class="auto">camera</span>' : ''}${e.reviewed ? '<span class="auto">reviewed</span>' : ''}${e.overturned ? `<br><small style="color:var(--muted)">Camera said ${esc(e.overturned)}</small>` : ''}</td>
       <td><span class="verdict v-${e.verdict}">${esc(e.result)}</span></td>
-      <td>${inBuf(e.bufT) ? `<button data-replay="${e.bufT}">Replay</button>` : ''}</td>
+      <td>${inBuf(e.bufT) ? `<button data-replay="${e.id}">Replay</button>` : ''}</td>
     </tr>`).join('')
     : '<tr><td colspan="5" style="color:var(--muted)">No calls yet. Faults the camera catches show up here, along with calls you make by hand.</td></tr>';
 }
-$('logBody').onclick = (e) => { const b = e.target.closest('[data-replay]'); if (b) openReplay(+b.dataset.replay); };
+$('logBody').onclick = (e) => {
+  const b = e.target.closest('[data-replay]');
+  const entry = b && game.log.find((x) => String(x.id) === b.dataset.replay);
+  if (entry) openReplay(entry.bufT, entry);
+};
 $('clearLog').onclick = () => { game.log = []; saveGame(); renderLog(); renderScore(); };
 $('newGame').onclick = () => {
   Object.assign(game, { A: 0, B: 0, serving: 'A', faults: 0, log: [] });
