@@ -1,0 +1,167 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no">
+<title>Spikeball Ref</title>
+<meta name="description" content="Live roundnet foul tracker: watches the net with your phone camera and flags rim hits, roll-ups and double bounces.">
+<meta name="theme-color" content="#0b0f14">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="Spike Ref">
+<link rel="apple-touch-icon" href="icons/icon-180.png">
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Barlow+Condensed:wght@600;800&display=swap">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div class="app">
+  <header class="bar" aria-label="Scoreboard">
+    <div class="team" id="teamA">
+      <button class="score" id="scoreA" aria-label="Add a point to team A">0</button>
+      <div class="tmeta"><span class="tname" id="nameAView">Team A</span><button class="minus" data-minus="A" aria-label="Take a point from team A">−1</button></div>
+    </div>
+    <div class="mid">
+      <div class="status" id="gameStatus">First to 21, win by 2</div>
+      <div class="pips" aria-label="Serve faults this point"><span>Serve faults</span><i id="pip1"></i><i id="pip2"></i></div>
+      <div class="live" id="liveStatus">Not tracking</div>
+    </div>
+    <div class="team right" id="teamB">
+      <button class="score" id="scoreB" aria-label="Add a point to team B">0</button>
+      <div class="tmeta"><button class="minus" data-minus="B" aria-label="Take a point from team B">−1</button><span class="tname" id="nameBView">Team B</span></div>
+    </div>
+  </header>
+
+  <main class="stage" id="stage">
+    <video id="video" playsinline muted autoplay hidden></video>
+    <canvas id="demo" hidden></canvas>
+    <canvas id="overlay"></canvas>
+
+    <section class="start" id="start">
+      <h1><span class="dot"></span>Spikeball Ref</h1>
+      <p>Point your phone at the net. It follows the ball and flags rim hits, roll-ups and double bounces the moment they happen.</p>
+      <ol class="tips">
+        <li>Prop the phone 1–2 m from the net, about knee to waist high, so the rim looks like a flat oval.</li>
+        <li>Turn the phone sideways and keep it still. A cheap tripod or a water bottle works.</li>
+        <li>Drag the oval onto the rim, then play.</li>
+      </ol>
+      <div class="startbtns">
+        <button class="primary big" id="btnCamera">Start camera</button>
+        <button id="btnDemo">Try the demo</button>
+        <label class="btn" for="clipInput">Check a recorded clip</label>
+        <input type="file" id="clipInput" accept="video/*" hidden>
+      </div>
+      <p class="error" id="startError" hidden></p>
+    </section>
+
+    <div class="banner" id="banner" hidden role="alert">
+      <div class="btop">
+        <span class="bkind" id="bKind">RIM HIT</span>
+        <span class="bwhy" id="bWhy"></span>
+      </div>
+      <div class="bbtns">
+        <button class="primary" id="bPointA">Point A</button>
+        <button class="primary" id="bPointB">Point B</button>
+        <button id="bReplay">Replay</button>
+        <button id="bIgnore">Ignore</button>
+      </div>
+    </div>
+    <div class="chip" id="chip" hidden></div>
+  </main>
+
+  <nav class="tools" id="tools" aria-label="Tools">
+    <button data-open="rim"><b>Rim</b><small>set oval</small></button>
+    <button data-open="color"><b>Ball</b><small>set color</small></button>
+    <button data-open="replay"><b>Replay</b><small>last 2.5 s</small></button>
+    <button data-open="calls"><b>Calls</b><small>rules</small></button>
+    <button data-open="log"><b>Log</b><small id="logCount">0 calls</small></button>
+    <button data-open="settings"><b>Setup</b><small>tune</small></button>
+  </nav>
+  <nav class="tools mode" id="modeBar" hidden>
+    <span id="modeHint">Drag the oval onto the rim.</span>
+    <button class="primary" id="modeDone">Done</button>
+  </nav>
+</div>
+
+<!-- Replay -->
+<section class="sheet full" id="sheet-replay" hidden aria-label="Instant replay">
+  <div class="sheethead">
+    <h2>Instant replay</h2>
+    <button class="close" data-close>Back to live</button>
+  </div>
+  <div class="replaywrap"><canvas id="replayCanvas"></canvas><span class="rtime" id="rTime">0.00 s</span><span class="rspeed" id="rSpeedTag">¼×</span></div>
+  <div class="scrubwrap"><div class="ticks" id="rTicks"></div><input type="range" id="rScrub" min="0" max="0" value="0" aria-label="Scrub replay"></div>
+  <div class="row">
+    <button id="rBack">◀ frame</button>
+    <button class="primary" id="rPlay">Pause</button>
+    <button id="rFwd">frame ▶</button>
+    <span class="grow"></span>
+    <button data-rspeed="0.1">0.1×</button>
+    <button data-rspeed="0.25">¼×</button>
+    <button data-rspeed="0.5">½×</button>
+    <button data-rspeed="1">1×</button>
+  </div>
+</section>
+
+<!-- Calls -->
+<section class="sheet" id="sheet-calls" hidden aria-label="Call sheet">
+  <div class="sheethead">
+    <h2>Make a call</h2>
+    <button class="close" data-close>Close</button>
+  </div>
+  <div class="row"><span class="label">Who did it</span><button id="whoA" class="on">Team A</button><button id="whoB">Team B</button></div>
+  <div class="row cats" id="cats"></div>
+  <div class="calls" id="calls"></div>
+  <p class="hint">Common tournament rules. Casual games differ on pockets and serve height, so agree before you play.</p>
+</section>
+
+<!-- Log -->
+<section class="sheet" id="sheet-log" hidden aria-label="Foul log">
+  <div class="sheethead">
+    <h2>Call log</h2>
+    <button class="close" data-close>Close</button>
+  </div>
+  <div class="logwrap"><table><thead><tr><th>Time</th><th>Score</th><th>Call</th><th>Result</th><th></th></tr></thead><tbody id="logBody"></tbody></table></div>
+  <div class="row"><button id="clearLog">Clear log</button><button id="newGame">New game</button></div>
+</section>
+
+<!-- Settings -->
+<section class="sheet" id="sheet-settings" hidden aria-label="Setup">
+  <div class="sheethead">
+    <h2>Setup</h2>
+    <button class="close" data-close>Close</button>
+  </div>
+  <div class="field"><span class="label">Video source</span>
+    <div class="row"><button data-src="camera">Camera</button><button data-src="demo">Demo</button><label class="btn" for="clipInput2">Recorded clip</label><input type="file" id="clipInput2" accept="video/*" hidden></div>
+  </div>
+  <div class="field"><span class="label">Teams</span>
+    <div class="row"><input id="setNameA" maxlength="16" aria-label="Team A name"><input id="setNameB" maxlength="16" aria-label="Team B name">
+      <select id="setTarget" aria-label="Game to"><option value="11">to 11</option><option value="15">to 15</option><option value="21">to 21</option></select></div>
+  </div>
+  <div class="field"><label class="label" for="setTol">Ball color match <output id="outTol"></output></label>
+    <div class="row"><span class="swatch" id="swatch"></span><input type="range" id="setTol" min="6" max="40" step="1"></div>
+    <p class="hint">Tap “Ball” on the toolbar, then tap the ball on screen to teach it your ball's color. Widen this if it loses the ball in shade.</p>
+  </div>
+  <div class="field"><label class="label" for="setRimMin">Rim zone starts at <output id="outRimMin"></output></label>
+    <input type="range" id="setRimMin" min="0.8" max="1" step="0.01">
+    <label class="label" for="setRimMax">Rim zone ends at <output id="outRimMax"></output></label>
+    <input type="range" id="setRimMax" min="1.02" max="1.5" step="0.01">
+    <p class="hint">1.00 is the rim line you drew. Bounces inside the start value count as net or pocket. Raise “ends at” if rim hits on the far side get missed.</p>
+  </div>
+  <div class="field"><label class="label" for="setRoll">Roll-up after <output id="outRoll"></output></label>
+    <input type="range" id="setRoll" min="200" max="900" step="25">
+  </div>
+  <div class="field toggles">
+    <label><input type="checkbox" id="setSound"> Whistle sound on faults</label>
+    <label><input type="checkbox" id="setLegal"> Show legal net hits</label>
+    <label><input type="checkbox" id="setMask"> Show what it sees as ball (pink)</label>
+  </div>
+  <div class="row"><button id="resetTuning">Reset tuning</button></div>
+</section>
+
+<div class="toast" id="toast" role="status" aria-live="polite"></div>
+<script type="module" src="app.js"></script>
+</body>
+</html>
